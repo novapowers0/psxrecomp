@@ -388,6 +388,7 @@ static int sio_mc_max_state = 0;    /* highest mc_state reached */
 static int sio_tx_writes = 0;       /* ANY write to SIO_TX_DATA */
 static int sio_tx_gated = 0;        /* writes gated by missing TX_EN */
 static uint16_t sio_last_ctrl_on_tx = 0; /* CTRL at last TX write */
+static int sio_no_tx_gate = 0;      /* title-scoped compatibility */
 
 /* ---- SIO byte-level trace ring buffer ---- */
 static PSX_BSS SioTraceEntry sio_trace_buf[SIO_TRACE_CAP];
@@ -412,6 +413,9 @@ int sio_card_protocol_active(void) {
     if (mc_slots[1].state != MC_IDLE) return 1;
     return 0;
 }
+
+void sio_set_no_tx_gate(int enabled) { sio_no_tx_gate = enabled ? 1 : 0; }
+int sio_get_no_tx_gate(void) { return sio_no_tx_gate; }
 
 /* Hold ChangeThread-defer across the card ACK → guest IntRP epilogue window.
  * SELECT deassert clears mc_state before DeliverEvent / nested pops finish, so
@@ -2147,7 +2151,7 @@ void sio_write(uint32_t addr, uint32_t value) {
                 (hb == 0x81 || hb == 0x52 || hb == 0x57 || hb == 0x53))
                 card_handoff_push(4, hb);
         }
-        if (!(sio_ctrl & SIO_CTRL_TX_EN)) {
+        if (!(sio_ctrl & SIO_CTRL_TX_EN) && !sio_no_tx_gate) {
             sio_tx_gated++;
             sr_record(SR_EVT_TX_DATA_WRITE, (uint8_t)value, 0);
             break;

@@ -3,6 +3,7 @@
 #endif
 
 #include "psx_netplay.h"
+#include "psx_chat_filter_compat.h"
 
 #include "host_time.h"
 #include "memcard.h"
@@ -3678,7 +3679,13 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
             return -1;
         }
         rcfg.local_slot = (rnet_u8)slots;
-        rcfg.wire_slot = (rnet_u8)cfg->spectator_wire_slot;
+        /* The pinned recomp-net API has no relay wire-slot field. Spectator
+         * sessions remain disabled until that protocol field is available. */
+        fprintf(stderr,
+                "psxrecomp: spectator relay slots are unavailable in this "
+                "recomp-net pin\n");
+        fflush(stderr);
+        return -1;
     } else {
         rcfg.local_slot = (rnet_u8)local;
     }
@@ -3950,9 +3957,9 @@ int psx_netplay_start(const PsxNetplayConfig *cfg)
     }
     if (g_np.spectator) {
         fprintf(stderr,
-                "psxrecomp: SPECTATING - simulating %d seat(s) from the wire, "
-                "relay slot %u, contributing no input\n",
-                slots, (unsigned)rcfg.wire_slot);
+                "psxrecomp: SPECTATING is unavailable with this "
+                "recomp-net pin (%d seat(s))\n",
+                slots);
         fflush(stderr);
     }
     g_np.input_player = in_player;

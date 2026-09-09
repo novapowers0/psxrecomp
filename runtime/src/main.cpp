@@ -57,7 +57,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "psx_selfcheck.h"
 #include "psx_lobby_client.h"
 #if defined(PSX_HAS_RECOMP_NET)
-#include "recomp_net/chat_filter.h" /* chat profanity mask, LAN rooms too */
+#include "psx_chat_filter_compat.h"
 #endif
 #include "spu.h"
 #include "audio_trace.h"
@@ -11956,8 +11956,6 @@ namespace {
         int resume_netplay_room)
     {
         if (!gi) return;
-        (void)ws_offered_b;
-        (void)ws_ultrawide_offered_b;
         launcher_profile_apply("psx", gi);
         gi->name = game_name_c;
         gi->region = region_c;
@@ -11978,6 +11976,7 @@ namespace {
         gi->locked_pad_mode = locked_pad_mode_i;
         gi->lock_device = ctrl_lock_device_b ? 1 : 0;
         gi->aspect_mask = 0;
+        gi->adaptive_view_supported = 0;
         gi->renderer_labels = kPsxRendererLabels;
         gi->num_renderers = vulkan_offered_b ? 3 : 2;
         gi->settings_bindings = 1;
@@ -12278,10 +12277,9 @@ int main(int argc, char** argv) {
     }
     bool ctrl_lock_mode    = false; /* game.toml [controller] lock_mode; true hides the whole pad-mode selector */
     bool ctrl_lock_device  = false; /* game.toml [controller] lock_device; true hides the Player controller cards entirely */
-    /* Widescreen/View mode and Skip FMVs are mod-owned on PSX. Their legacy
-     * game.toml offer flags remain parseable for old projects but deliberately
-     * cannot expose generic launcher controls or activate the features. Trusted
-     * activation plugins apply them after launcher/settings resolution. */
+    /* Widescreen is owned by the trusted mod catalog, like Bloody Roar 2.
+     * Do not also expose the generic Display -> Aspect ratio row: two owners
+     * can race through settings.toml and the mod activation callback. */
     constexpr bool ws_offered = false;
     constexpr bool ws_ultrawide_offered = false;
     constexpr bool frame_interpolation_offered = false;
@@ -12456,6 +12454,7 @@ int main(int argc, char** argv) {
             g_video_pgxp_cpu_mode = gc.runtime.video_pgxp_cpu_mode ? 1 : 0;
             g_video_pgxp_tolerance = (float)gc.runtime.video_pgxp_tolerance;
             g_video_renderer   = gc.runtime.video_renderer;
+            vulkan_offered     = gc.runtime.video_offer_vulkan;
             g_video_screen     = gc.runtime.video_screen_kind;
             g_video_scanlines  = gc.runtime.video_scanlines;
             g_video_scanline_strength =
@@ -12685,6 +12684,7 @@ int main(int argc, char** argv) {
              * touch this flag, so applying it here (config-load time) is stable.
              * Full history + removal plan: psxrecomp sio.c g_pad_legacy_cfg. */
             sio_set_legacy_cfg(gc.runtime.legacy_pad_config ? 1 : 0);
+            sio_set_no_tx_gate(gc.runtime.sio_no_tx_gate ? 1 : 0);
             { const char *e = std::getenv("PSX_GL_FORCE_CPU_PRESENT");
               if (e && e[0] && e[0] != '0') g_gl_fbo_present = 0; }
             game_entry_pc = gc.entry_pc;

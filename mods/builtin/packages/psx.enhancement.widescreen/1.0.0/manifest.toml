@@ -1,0 +1,35 @@
+format_version = 5
+id = "psx.enhancement.widescreen"
+version = "1.0.0"
+name = "Widescreen (WIP)"
+author = "NovaPowers"
+description = "WIP - Presentation aspect selection for Dragon Ball GT: Final Bout. The current profile exposes the trusted 16:9/21:9 display path while experimental FOV and culling rewrites remain separately gated."
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "*"
+
+[[feature]]
+id = "widescreen"
+name = "Widescreen View (WIP)"
+description = "Select 16:9 or 21:9 presentation. Final Bout keeps the conservative guest-coordinate path until its per-title culling sites are validated."
+group = "Visual"
+default_enabled = false
+
+[[option]]
+feature = "widescreen"
+id = "aspect"
+label = "Aspect ratio"
+description = "16:9 widescreen or 21:9 ultrawide."
+group = "Visual"
+type = "choice"
+choice = [
+  { value = "16:9", label = "16:9" },
+  { value = "21:9", label = "21:9" },
+]
+default = "16:9"
+
+[[plugin]]
+feature = "widescreen"
+id = "psx.widescreen"

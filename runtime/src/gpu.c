@@ -366,7 +366,10 @@ static int ws_game_mode(void) {
  * real scene change crosses it in ~0.1 s. */
 #define WS_2D_SCENE_HYSTERESIS 6u
 static int ws_2d_only_scene(void) {
-    if (ws_full_2d_mode() || ws_gte_game_mode_cfg) return 0;
+    /* GTE activity can classify a menu effect as gameplay briefly. Keep the
+     * independent overhang signal active so 2D presentation stays pillarboxed
+     * instead of flashing wide for a few frames. */
+    if (ws_full_2d_mode()) return 0;
     return (uint32_t)s_frame_count - ws_sust_ovh_stamp > WS_2D_SCENE_HYSTERESIS;
 }
 

@@ -629,6 +629,11 @@ struct RuntimeConfig {
     // make that re-detect benign. Scoped per-game; no other title's behaviour changes.
     // Wired to sio_set_legacy_cfg(); see sio.c g_pad_legacy_cfg.
     bool                  legacy_pad_config = false;
+    // Some titles clear TX_EN between bytes while continuing the same SIO
+    // transaction. The hardware-compatible gate is correct by default, but
+    // those titles need the transmitter to remain serviceable until SELECT
+    // is released. This is deliberately per-game, not a global relaxation.
+    bool                  sio_no_tx_gate = false;
     // anti_deadzone: minimum radial analog output after leaving deadzone, in
     // raw SDL axis units (0..32767). This is a game-owned response setting used
     // to compensate a title's own internal stick deadzone. Absent => 0.

@@ -152,7 +152,7 @@ void psx_lobby_clear_launch_pending(void) {}
 #include "recomp_net/ice_rtt.h"
 #include "recomp_net/lan_beacon.h"
 #include "recomp_net/rtt_probe.h"
-#include "recomp_net/chat_filter.h"
+#include "psx_chat_filter_compat.h"
 #include "host_time.h"
 
 #if defined(_WIN32)

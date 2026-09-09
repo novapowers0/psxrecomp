@@ -116,6 +116,10 @@ int  sio_get_multitap_port(void);
 /* Tomba-only legacy pad config path ([controller] legacy_pad_config). */
 void sio_set_legacy_cfg(int enabled);
 int  sio_get_legacy_cfg(void);
+/* Per-title compatibility for games that clear TX_EN between transaction
+ * bytes. Default 0 preserves the hardware gate for every other title. */
+void sio_set_no_tx_gate(int enabled);
+int  sio_get_no_tx_gate(void);
 /* 1 when multitap is armed and `logical_slot` is a tap pad (not the lone
  * pad on the opposite console port). SCPH-1070 taps are treated as plain
  * digital controllers (0x41) by default — DualShock/analog on a tap is not
