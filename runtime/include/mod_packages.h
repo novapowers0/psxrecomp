@@ -420,6 +420,17 @@ public:
         const std::map<std::string, ModSelection>& snapshot) {
         selections_ = snapshot;
     }
+    /* Drop every feature enablement + option value while keeping each package's
+     * selected version. A netplay peer must run the host's configuration, not
+     * its own offline set merged on top; clearing first makes the subsequent
+     * plan the authoritative selection. */
+    void reset_feature_selections() {
+        for (auto& entry : selections_) {
+            entry.second.features.clear();
+            entry.second.values.clear();
+            entry.second.enabled = false;
+        }
+    }
     const ModPackage* selected_package(const std::string& id) const;
     const ModFeature* selected_feature(const std::string& package_id,
                                        const std::string& feature_id) const;

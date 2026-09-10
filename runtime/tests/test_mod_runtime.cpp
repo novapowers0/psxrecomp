@@ -176,7 +176,7 @@ int main() {
         "type = \"integer\"\n"
         "min = 0\n"
         "max = 254\n"
-        "default = 42\n"
+        "default = 0\n"
         "[[option]]\n"
         "feature = \"sparse-main\"\n"
         "id = \"frames\"\n"
@@ -536,11 +536,15 @@ int main() {
               error.c_str());
         check(missing == 0,
               "a plan whose package is installed locally must report no missing");
-        /* The committed plan must now target sparse-main's address. */
-        ram[0x2000] = 2; ram[0x2001] = 0; ram[0x2002] = 1; ram[0x2003] = 0x32;
+        /* The guest adopts the host plan exactly: only sparse-main is enabled,
+         * so its frames field is written at the guarded address while the
+         * offline sparse-flag feature (same address, offset 1) must NOT run. */
+        ram[0x1200] = 2; ram[0x1201] = 0; ram[0x1202] = 1; ram[0x1203] = 0x32;
         mod_runtime_on_dispatch(0x80002000);
-        check(ram[0x2001] == 0x42,
-              "applied host plan must drive the sparse guard-only byte");
+        check(ram[0x1200] == 7 && ram[0x1201] == 0x00 &&
+                  ram[0x1202] == 0x01 && ram[0x1203] == 0x32,
+              "applied host plan must replace the offline selection: only "
+              "sparse-main writes its field, sparse-flag stays off");
 
         /* Re-init from disk: the transient host selection must NOT have been
          * written — the persisted state still enables dynamic-main with
@@ -553,8 +557,10 @@ int main() {
         const bool reserialized = PSXRecompV4::mod_runtime_netplay_serialize_package(
             "runtime.test", cfg2, sizeof(cfg2));
         check(reserialized &&
-                  std::string(cfg2).find("dynamic-main") != std::string::npos &&
-                  std::string(cfg2).find("sparse-main") == std::string::npos,
+                  std::string(cfg2).find("dynamic-main.count=42") !=
+                      std::string::npos &&
+                  std::string(cfg2).find("sparse-main.frames=7") ==
+                      std::string::npos,
               "transient netplay plan must never persist over the offline "
               "selection");
     }

@@ -261,7 +261,10 @@ bool sha256_file(const std::filesystem::path& path, std::string& out,
         return true;
     }
 
-    std::array<uint8_t, 1024 * 1024> buffer{};
+    /* Stream in small chunks: a whole-image buffer here would be ~1 MB of stack
+     * and can overflow the default stack at realistic call depths (it did in
+     * the mod-runtime test). SHA-256 does not care about the read size. */
+    std::array<uint8_t, 64 * 1024> buffer{};
     std::ifstream file(input, std::ios::binary);
     if (!file) {
         if (error) *error = "cannot fingerprint image: " + input.string();
@@ -1383,6 +1386,11 @@ bool mod_runtime_netplay_apply_plan(const void* plan, int count, int* missing,
     const auto* entries = static_cast<const PsxLobbyPlanMod*>(plan);
     const std::map<std::string, ModSelection> saved =
         s.manager.selections_snapshot();
+    /* The peer adopts the host's configuration, not its own offline selection
+     * with the host's features merged on top: a guest running an extra mod the
+     * host lacks would desync the match. Clear feature selections first, then
+     * let the host plan be authoritative. Versions are preserved. */
+    s.manager.reset_feature_selections();
     int miss = 0;
     for (int i = 0; i < count; ++i) {
         const PsxLobbyPlanMod& entry = entries[i];
