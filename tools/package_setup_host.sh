@@ -524,6 +524,10 @@ if [[ -f "${STAGE}/CMakeLists.txt" ]]; then
   while IFS= read -r rel; do
     [[ -z "${rel}" ]] && continue
     case "${rel}" in *"*"*|*"?"*|*'$'*) continue ;; esac
+    # Recompiler output. This packager deletes generated/ on purpose (that C is
+    # produced locally from the player's own disc), so a CMakeLists reference to
+    # it is expected to be absent from the zip and must not be demanded here.
+    case "${rel}" in generated|generated/*) continue ;; esac
     if [[ -n "${guarded}" ]] && grep -qxF -- "${rel}" <<<"${guarded}"; then
       continue
     fi
