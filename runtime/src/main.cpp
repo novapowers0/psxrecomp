@@ -7686,10 +7686,29 @@ static PSXRecompV4::NetplayDiscExpect netplay_expect_for_disc(
             g_disc_netplay_fps.find(uppercase_ascii(disc.stem().string()));
         if (it != g_disc_netplay_fps.end()) e.required_disc_fp = it->second;
     }
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+    /* Universal build: one [netplay] fingerprint cannot cover several regional
+     * dumps, so resolve it from the image that owns this disc's boot EXE. The
+     * per-image fingerprint lives in the PsxGameBackend descriptor. */
+    {
+        const std::string stem = read_disc_boot_stem(disc.string());
+        if (!stem.empty()) {
+            const PsxGameBackend* be = psx_game_backend_match(stem.c_str());
+            if (be && be->netplay_disc_fp && be->netplay_disc_fp[0])
+                e.required_disc_fp = be->netplay_disc_fp;
+        }
+    }
+#endif
     return e;
 }
 static std::string g_session_disc_fp;
 static bool        g_session_netplay_disc_ok = false;
+/* Region tag the mounted disc resolved to for netplay ("(USA)" / "(Europe)" /
+ * "(Japan)"). A universal build strips the region from the display title, but
+ * the lobby must keep two regional dumps of the same title apart: the lobby
+ * advertises `game_name`, so the tag is appended there (never to the window
+ * title). Empty until the launcher verifies a disc, or non-universal. */
+static std::string g_lnch_netplay_region;
 
 #if defined(RECOMP_LAUNCHER)
 // Host verification/inspection callbacks for the shared recomp-ui launcher.
@@ -7932,6 +7951,9 @@ namespace {
                                p4 == "SLPM")                        ? "NTSC-J"
                                                                     : "";
             std::snprintf(out->region, sizeof(out->region), "%s", reg);
+            /* The lobby match key must separate regional dumps of one title;
+             * the display title cannot carry the region in a universal build. */
+            g_lnch_netplay_region = region_label_from_serial(reg_be->game_id);
         }
 #else
         const bool registry_accepted = false;
@@ -7995,6 +8017,12 @@ namespace {
     }
 
     std::string g_lnch_netplay_game_name;
+    /* Lobby match key: base title plus the mounted region's tag, so an EU host
+     * and a USA guest are not paired by a region-less universal `game_name`. */
+    static std::string lnch_netplay_lobby_game_name() {
+        if (g_lnch_netplay_region.empty()) return g_lnch_netplay_game_name;
+        return g_lnch_netplay_game_name + " " + g_lnch_netplay_region;
+    }
     int g_lnch_game_players = 2; /* from game.toml; lobby max_slots default */
     std::filesystem::path g_lnch_settings_path;
     std::string g_lnch_lobby_url;
@@ -8974,7 +9002,8 @@ namespace {
         g_lnch_lan_my_slot = 0;
         AeLanLobbyState state;
         state.name = name && name[0] ? name : "LAN Lobby";
-        state.game = g_lnch_netplay_game_name.empty() ? "PSX" : g_lnch_netplay_game_name;
+        state.game = lnch_netplay_lobby_game_name().empty()
+            ? "PSX" : lnch_netplay_lobby_game_name();
         state.endpoint = endpoint && endpoint[0] ? endpoint : "127.0.0.1:7777";
         state.host_name = psx_lobby_display_name();
         if (state.host_name.empty()) state.host_name = "Host";
@@ -10303,12 +10332,12 @@ namespace {
     }
 
     int ae_np_connect(void*) {
-        psx_lobby_set_game_identity(g_lnch_netplay_game_name.c_str(), psx_lobby_game_version());
+        psx_lobby_set_game_identity(lnch_netplay_lobby_game_name().c_str(), psx_lobby_game_version());
         psx_lobby_set_disc_fp(g_session_disc_fp.c_str());
         psx_lobby_set_max_slots(g_lnch_game_players);
         const int rc = psx_lobby_connect(ae_np_default_url(nullptr));
         /* connect resets g_lc; re-apply so create/join never advertise "". */
-        psx_lobby_set_game_identity(g_lnch_netplay_game_name.c_str(), psx_lobby_game_version());
+        psx_lobby_set_game_identity(lnch_netplay_lobby_game_name().c_str(), psx_lobby_game_version());
         psx_lobby_set_disc_fp(g_session_disc_fp.c_str());
         psx_lobby_set_max_slots(g_lnch_game_players);
         return rc;
@@ -11265,8 +11294,8 @@ namespace {
         /* Ensure TOC fp survives connect/reset before the lobby stores it. */
         psx_lobby_set_disc_fp(g_session_disc_fp.c_str());
         return psx_lobby_create(lobby_name && lobby_name[0] ? lobby_name : "Netplay Lobby",
-                                g_lnch_netplay_game_name.c_str(), psx_lobby_game_version(),
-                                password ? password : "", endpoint, &caps);
+        lnch_netplay_lobby_game_name().c_str(), psx_lobby_game_version(),
+        password ? password : "", endpoint, &caps);
     }
 
     /* guest_bind is in/out (capacity >= 64). recomp-ui fills a real UDP port
@@ -11330,8 +11359,8 @@ namespace {
             ae_np_lan_udp_close();
             AeLanLobbyState seated{};
             seated.name = "Direct";
-            seated.game =
-                g_lnch_netplay_game_name.empty() ? "PSX" : g_lnch_netplay_game_name;
+            seated.game = lnch_netplay_lobby_game_name().empty()
+                ? "PSX" : lnch_netplay_lobby_game_name();
             seated.endpoint = endpoint;
             seated.password = password ? password : "";
             const int ack = ae_np_lan_wait_join_ack(endpoint, password, &seated);

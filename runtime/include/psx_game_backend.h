@@ -29,6 +29,7 @@ typedef struct PsxGameBackend {
     uint32_t load_address;       /* guest load vaddr for THIS image */
     uint32_t entry_pc;           /* guest entry PC for THIS image (timing) */
     uint32_t text_size;          /* static text segment size for THIS image */
+    const char* netplay_disc_fp; /* THIS image's required TOC fp, or "" */
     int (*address_in_text)(uint32_t addr);
     int (*dispatch_compiled)(CPUState* cpu, uint32_t addr);
     int (*is_function_entry)(uint32_t addr);

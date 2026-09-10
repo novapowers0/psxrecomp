@@ -321,6 +321,7 @@ int main(int argc, char** argv) {
     std::string           game_id_str;         // [game] id (descriptor)
     uint32_t              game_entry_pc_cfg = 0;  // [game] entry_pc (descriptor)
     uint32_t              game_load_addr_cfg = 0; // [game] load_address (descriptor)
+    std::string           game_netplay_fp_cfg;    // [netplay] required_disc_fp
 
     if (!config_path.empty()) {
         const auto cfg = PSXRecompV4::load_game_config(config_path);
@@ -330,6 +331,7 @@ int main(int argc, char** argv) {
         game_id_str          = cfg.id;
         game_entry_pc_cfg    = cfg.entry_pc;
         game_load_addr_cfg   = cfg.load_address;
+        game_netplay_fp_cfg  = cfg.netplay_required_disc_fp;
         reachable_discovery  = cfg.discovery == "reachable";
         extra_funcs_storage  = cfg.seeds_path.string();
         extra_funcs_path     = extra_funcs_storage.c_str();
@@ -1796,6 +1798,7 @@ int main(int argc, char** argv) {
             ds << fmt::format("    0x{:08X}u,\n", game_load_addr_cfg);
             ds << fmt::format("    0x{:08X}u,\n", game_entry_pc_cfg);
             ds << fmt::format("    0x{:08X}u,\n", configured_text_size);
+            ds << fmt::format("    \"{}\",\n", game_netplay_fp_cfg);
             ds << "    psx_game_address_in_text,\n";
             ds << "    psx_dispatch_game_compiled,\n";
             ds << "    psx_game_is_function_entry,\n";
