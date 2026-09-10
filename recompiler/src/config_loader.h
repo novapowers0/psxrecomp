@@ -1177,6 +1177,15 @@ struct GameConfig {
     //   reveal pixels once before the new stage background is submitted.
     uint32_t ws_bg2d_init_func    = 0;
     uint32_t ws_bg2d_packet_cap       = 1000;
+
+    // [recompiler] symbol_prefix: namespace every generated game symbol
+    // (func_XXXXXXXX and the psx_game_* dispatch interface) under this prefix
+    // so several regional images of one title can link into a single runtime
+    // binary. Empty = the historical unprefixed emission (isolated targets).
+    // The universal build sets a distinct prefix per region and links one
+    // PsxGameBackend descriptor per prefix; the runtime selects the active
+    // image by the boot EXE serial before handoff.
+    std::string symbol_prefix;
 };
 
 // UserSettings — the launcher-written, user-editable override layer.

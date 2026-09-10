@@ -85,4 +85,11 @@ DiscIdentity identify_disc(const std::filesystem::path& path,
 // Apply / re-apply netplay mount policy onto an already-identified disc.
 void apply_netplay_disc_expect(DiscIdentity& id, const NetplayDiscExpect& expect);
 
+// The BOOT EXE stem the BIOS loads from this disc (e.g. "SLES_017.22"), parsed
+// from SYSTEM.CNF via a real ISO-directory lookup. Unlike identify_disc's
+// early-metadata serial scan, this works for images whose SYSTEM.CNF sits far
+// into the file, which is what a universal build needs to pick the regional
+// image. Returns "" when the disc or SYSTEM.CNF cannot be read.
+std::string disc_boot_stem(const std::filesystem::path& path);
+
 }  // namespace PSXRecompV4

@@ -67,15 +67,30 @@ def main():
     print(f"  dispatch_c = {cfg.dispatch_c}")
     print()
 
-    if not cfg.full_c.exists():
+    # Large titles split the full emit into `_full_NN.c` chunks; accept either
+    # the single-file or the chunked layout.
+    full_files = []
+    if cfg.full_c.exists():
+        full_files = [cfg.full_c]
+    else:
+        full_files = sorted(cfg.full_c.parent.glob(cfg.full_c.stem + "_*.c"))
+    if not full_files:
         print(f"ERROR: full_c not found: {cfg.full_c}", file=sys.stderr)
         return 2
     if not cfg.dispatch_c.exists():
         print(f"ERROR: dispatch_c not found: {cfg.dispatch_c}", file=sys.stderr)
         return 2
 
-    full_c = cfg.full_c.read_text(encoding="utf-8", errors="replace")
+    full_c = "".join(p.read_text(encoding="utf-8", errors="replace")
+                     for p in full_files)
     dispatch_c = cfg.dispatch_c.read_text(encoding="utf-8", errors="replace")
+
+    # Universal builds namespace generated symbols with the region's
+    # [recompiler] symbol_prefix. Strip it so the emit-shape patterns below
+    # (authored against the unprefixed emit) keep matching.
+    if cfg.symbol_prefix:
+        full_c = full_c.replace(cfg.symbol_prefix, "")
+        dispatch_c = dispatch_c.replace(cfg.symbol_prefix, "")
 
     # ── 1. Direct-call resolution ──────────────────────────────────────
     defined_funcs = set(RE_FUNC_DEF.findall(full_c))

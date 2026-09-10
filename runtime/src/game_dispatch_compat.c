@@ -10,6 +10,9 @@
 
 #include "dirty_ram_interp.h"
 
+/* Universal multi-region builds own the interface in psx_game_backend.c. */
+#ifndef PSX_GAME_BACKEND_REGISTRY
+
 #if defined(PSX_HAS_GAME_DISPATCH) && \
     !defined(PSX_GAME_DISPATCH_HAS_NATIVE_OK)
 
@@ -63,3 +66,5 @@ int psx_game_text_native_ok_full(uint32_t addr)
 }
 
 #endif /* PSX_HAS_GAME_DISPATCH */
+
+#endif /* !PSX_GAME_BACKEND_REGISTRY */

@@ -1,9 +1,11 @@
 #include "mod_runtime.h"
 
+#include "disc_identity.h"
 #include "disc_path.h"
 #include "iso_reader.h"
 #include "mod_packages.h"
 #include "mod_plugins.h"
+#include "psx_game_backend.h"
 #include "psx_lobby_client.h"
 #include "gpu.h"
 #include "psx_sha256.h"
@@ -1198,6 +1200,25 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
         s.disc_path = disc_path;
         s.disc_sha256 = std::move(digest);
     }
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+    /* Universal build: the configured game_id names the build's base region,
+     * but the committed disc may be any linked region. Re-bind the identity
+     * from the disc's own BOOT EXE so region-scoped mod targets resolve and
+     * the launch is not aborted for a perfectly valid pick. */
+    if (!s.disc_path.empty()) {
+        const std::string stem = PSXRecompV4::disc_boot_stem(s.disc_path);
+        const PsxGameBackend* be =
+            stem.empty() ? nullptr : psx_game_backend_match(stem.c_str());
+        if (be) {
+            if (be->game_id && s.game_id != be->game_id) {
+                s.game_id = be->game_id;
+                s.exe_sha256.clear();
+            }
+            /* MainExe mod writes are gated on the active image's entry PC. */
+            if (be->entry_pc != 0) s.entry_phys = be->entry_pc & 0x1FFFFFFFu;
+        }
+    }
+#endif
     ModResolution plan =
         s.manager.resolve(s.game_id, s.exe_sha256, s.disc_sha256);
     s.validation = plan;

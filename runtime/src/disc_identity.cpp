@@ -394,4 +394,39 @@ DiscIdentity identify_disc(const fs::path& path,
     return v;
 }
 
+std::string disc_boot_stem(const fs::path& path) {
+    if (path.empty()) return std::string();
+    // A .cue names the data track through its sheet; opening the resolved data
+    // track is what the BIOS ultimately reads. Fall back to the raw path when
+    // the resolver (e.g. for containers) has nothing better to offer.
+    const DiscPathResolution resolved = resolve_disc_path(path);
+    PS1::ISOReader iso;
+    bool opened = iso.Open(resolved.data.string());
+    if (!opened) opened = iso.Open(path.string());
+    if (!opened) return std::string();
+    uint8_t cnf[2048] = {0};
+    const size_t n = iso.ReadFile("SYSTEM.CNF", cnf, sizeof(cnf) - 1);
+    if (n == 0) return std::string();
+    std::string text((const char*)cnf, n);
+    std::string lower = text;
+    for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+    const size_t key = lower.find("cdrom:");
+    if (key == std::string::npos) return std::string();
+    size_t j = key + 6;
+    while (j < text.size() && (text[j] == '\\' || text[j] == '/')) j++;
+    std::string tok;
+    while (j < text.size()) {
+        const char c = text[j];
+        if (c == ';' || c == '\r' || c == '\n' || c == ' ' || c == '\t' ||
+            c == '\0')
+            break;
+        tok += c;
+        j++;
+        if (tok.size() > 64) break;
+    }
+    const size_t s2 = tok.find_last_of("\\/");
+    if (s2 != std::string::npos) tok = tok.substr(s2 + 1);
+    return tok;
+}
+
 }  // namespace PSXRecompV4

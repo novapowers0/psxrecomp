@@ -6,6 +6,8 @@
 #include <sstream>
 #include <string>
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <set>
 #include <vector>
 
@@ -36,6 +38,86 @@
 #endif
 
 namespace {
+
+// --- Universal multi-region symbol namespacing ----------------------------
+// When [recompiler] symbol_prefix is set, every generated game symbol is
+// emitted under that prefix so EU/USA/Japan images can link into one binary.
+// Only whole identifiers are rewritten: `func_` + exactly 8 hex digits, and
+// the five psx_game_* dispatch-interface definitions. The runtime owns the
+// unprefixed interface and forwards to the active image's descriptor.
+
+static bool br2_is_ident_char(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+// Function-like symbols the game emitter defines that must be namespaced:
+// every `func_<8 hex>` body/reference and every overlapping-alias body
+// `psx_alias_body_<8 hex>` (both are non-static and would collide otherwise).
+static const char* const kGameSymBases[] = { "func_", "psx_alias_body_" };
+
+static std::string apply_func_prefix(const std::string& text,
+                                     const std::string& prefix) {
+    if (prefix.empty()) return text;
+    std::string out;
+    out.reserve(text.size() + text.size() / 16);
+    const size_t n = text.size();
+    size_t i = 0;
+    while (i < n) {
+        bool matched = false;
+        for (const char* base : kGameSymBases) {
+            const size_t bl = std::strlen(base);
+            if (text.compare(i, bl, base) != 0) continue;
+            if (i != 0 && br2_is_ident_char(text[i - 1])) continue;
+            const size_t hex_begin = i + bl;
+            size_t e = hex_begin;
+            while (e < n && e < hex_begin + 8 &&
+                   std::isxdigit(static_cast<unsigned char>(text[e]))) {
+                ++e;
+            }
+            if (e == hex_begin + 8 &&
+                (e >= n || !br2_is_ident_char(text[e]))) {
+                out += prefix;
+                out.append(text, i, bl + 8);
+                i = e;
+                matched = true;
+                break;
+            }
+        }
+        if (matched) continue;
+        out += text[i++];
+    }
+    return out;
+}
+
+static std::string apply_symbol_prefix_dispatch(const std::string& text,
+                                                 const std::string& prefix) {
+    if (prefix.empty()) return text;
+    std::string t = apply_func_prefix(text, prefix);
+    static const char* kNames[] = {
+        "psx_dispatch_game_compiled",
+        "psx_game_address_in_text",
+        "psx_game_is_function_entry",
+        "psx_game_text_native_ok_full",
+        "psx_game_text_native_ok",
+    };
+    for (const char* nm : kNames) {
+        const std::string s(nm);
+        const std::string rep = prefix + s;
+        size_t pos = 0;
+        while ((pos = t.find(s, pos)) != std::string::npos) {
+            const bool lb = (pos == 0 || !br2_is_ident_char(t[pos - 1]));
+            const size_t after = pos + s.size();
+            const bool rb = (after >= t.size() || !br2_is_ident_char(t[after]));
+            if (lb && rb) {
+                t.replace(pos, s.size(), rep);
+                pos += rep.size();
+            } else {
+                pos += s.size();
+            }
+        }
+    }
+    return t;
+}
 
 struct AliasEntry { uint32_t addr, host_start, host_end; };
 
@@ -235,11 +317,19 @@ int main(int argc, char** argv) {
     std::filesystem::path out_dir = "generated";
     uint32_t              configured_text_size = 0;
     std::filesystem::path bios_profile_path;   // [recompiler] bios_config
+    std::string           game_symbol_prefix;  // [recompiler] symbol_prefix
+    std::string           game_id_str;         // [game] id (descriptor)
+    uint32_t              game_entry_pc_cfg = 0;  // [game] entry_pc (descriptor)
+    uint32_t              game_load_addr_cfg = 0; // [game] load_address (descriptor)
 
     if (!config_path.empty()) {
         const auto cfg = PSXRecompV4::load_game_config(config_path);
         exe_path             = cfg.exe_path;
         configured_text_size = cfg.text_size;
+        game_symbol_prefix   = cfg.symbol_prefix;
+        game_id_str          = cfg.id;
+        game_entry_pc_cfg    = cfg.entry_pc;
+        game_load_addr_cfg   = cfg.load_address;
         reachable_discovery  = cfg.discovery == "reachable";
         extra_funcs_storage  = cfg.seeds_path.string();
         extra_funcs_path     = extra_funcs_storage.c_str();
@@ -1366,7 +1456,8 @@ int main(int argc, char** argv) {
         // (no_output). Splitting a small overlay TU has no parallel-compile
         // benefit anyway.
         std::filesystem::path full_path(output_filename);
-        if (write_file_if_changed(full_path, full_c_code)) {
+        if (write_file_if_changed(
+                full_path, apply_func_prefix(full_c_code, game_symbol_prefix))) {
             fmt::print("✓ Saved overlay monolith to {}\n", output_filename.string());
         } else {
             fmt::print("✓ Overlay monolith unchanged ({})\n", output_filename.string());
@@ -1375,8 +1466,9 @@ int main(int argc, char** argv) {
         // 1. Shared declarations header (write-if-changed preserves Ninja mtimes).
         std::filesystem::path decls_filename = out_dir / (exe_stem + "_decls.h");
         {
-            const std::string decls =
-                codegen.build_shared_decls_header(codegen.last_gen_funcs());
+            const std::string decls = apply_func_prefix(
+                codegen.build_shared_decls_header(codegen.last_gen_funcs()),
+                game_symbol_prefix);
             if (write_file_if_changed(decls_filename, decls)) {
                 fmt::print("✓ Saved shared decls header to {}\n", decls_filename.string());
             } else {
@@ -1401,7 +1493,8 @@ int main(int argc, char** argv) {
             std::string body = fmt::format(
                 "/* Generated by PSXRecomp - full.c shard {}. DO NOT EDIT. */\n"
                 "#include \"{}\"\n\n{}",
-                shard_index, decls_basename, shard_buf.str());
+                shard_index, decls_basename,
+                apply_func_prefix(shard_buf.str(), game_symbol_prefix));
             if (write_file_if_changed(shard_filename, body)) {
                 fmt::print("✓ Saved shard {} ({} lines) to {}\n",
                            shard_index, shard_lines, shard_filename.string());
@@ -1688,7 +1781,47 @@ int main(int argc, char** argv) {
             ds << "#endif\n";
         }
 
-        if (write_file_if_changed(dispatch_filename, ds.str())) {
+        // Universal multi-region build: export one PsxGameBackend descriptor
+        // and self-register it before main(). The descriptor's function
+        // references are written unprefixed here and namespaced by the same
+        // pass that namespaces the rest of this file, so the emitted pointer
+        // names always match the emitted definitions.
+        if (!game_symbol_prefix.empty()) {
+            ds << "\n/* Universal build: game image backend descriptor. */\n";
+            ds << "#include \"psx_game_backend.h\"\n";
+            ds << fmt::format("const PsxGameBackend {}psx_game_backend = {{\n",
+                              game_symbol_prefix);
+            ds << fmt::format("    \"{}\",\n", exe_stem);
+            ds << fmt::format("    \"{}\",\n", game_id_str);
+            ds << fmt::format("    0x{:08X}u,\n", game_load_addr_cfg);
+            ds << fmt::format("    0x{:08X}u,\n", game_entry_pc_cfg);
+            ds << fmt::format("    0x{:08X}u,\n", configured_text_size);
+            ds << "    psx_game_address_in_text,\n";
+            ds << "    psx_dispatch_game_compiled,\n";
+            ds << "    psx_game_is_function_entry,\n";
+            ds << "    psx_game_text_native_ok,\n";
+            ds << "    psx_game_text_native_ok_full,\n";
+            ds << "};\n\n";
+            ds << fmt::format(
+                "static void {}psx_game_backend_ctor(void) {{\n"
+                "    psx_game_backend_register(&{}psx_game_backend);\n"
+                "}}\n",
+                game_symbol_prefix, game_symbol_prefix);
+            ds << "#if defined(_MSC_VER)\n";
+            ds << "#pragma section(\".CRT$XCU\", read)\n";
+            ds << fmt::format(
+                "__declspec(allocate(\".CRT$XCU\")) static void (*{}psx_game_backend_ctor_p)(void) = {}psx_game_backend_ctor;\n",
+                game_symbol_prefix, game_symbol_prefix);
+            ds << "#else\n";
+            ds << fmt::format(
+                "__attribute__((constructor)) static void {}psx_game_backend_ctor_attr(void) {{ {}psx_game_backend_ctor(); }}\n",
+                game_symbol_prefix, game_symbol_prefix);
+            ds << "#endif\n";
+        }
+
+        if (write_file_if_changed(
+                dispatch_filename,
+                apply_symbol_prefix_dispatch(ds.str(), game_symbol_prefix))) {
             fmt::print("✓ Dispatch table written ({} entries)\n\n",
                        dispatch_addrs.size());
         } else {

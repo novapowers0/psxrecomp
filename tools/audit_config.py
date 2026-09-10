@@ -65,6 +65,9 @@ class AuditConfig:
     regions: List[Region]
     kseg_mask: int
     remaps: List[Remap] = field(default_factory=list)
+    # Universal builds namespace generated symbols with [recompiler]
+    # symbol_prefix; audit tools strip it before matching emit-shape patterns.
+    symbol_prefix: str = ""
 
     def normalize_addr(self, addr: int) -> int:
         """Mirror the dispatch-table normalization rules from the config."""
@@ -194,6 +197,7 @@ def load(config_path) -> AuditConfig:
         regions=regions,
         kseg_mask=kseg_mask,
         remaps=remaps,
+        symbol_prefix=recomp.get("symbol_prefix", ""),
     )
 
 

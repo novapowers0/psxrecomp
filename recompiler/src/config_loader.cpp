@@ -1477,6 +1477,10 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         for (const auto& a : arr)
             hot_funcs.push_back(parse_hex(a, "recompiler.hot_funcs"));
     }
+    // Optional game-symbol namespace for universal multi-region binaries.
+    std::string symbol_prefix;
+    if (recomp.contains("symbol_prefix"))
+        symbol_prefix = toml::find<std::string>(recomp, "symbol_prefix");
     // Optional emitter-level load-charge batching for VLC leaves.
     bool load_charge_batch = false;
     std::vector<uint32_t> load_charge_batch_funcs;
@@ -2201,6 +2205,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_bg2d_layer_struct_stride*/ ws_bg2d_layer_struct_stride,
         /*ws_bg2d_init_func*/     ws_bg2d_init_func,
         /*ws_bg2d_packet_cap*/    ws_bg2d_packet_cap,
+        /*symbol_prefix*/         symbol_prefix,
     };
 }
 

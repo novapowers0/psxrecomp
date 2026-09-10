@@ -82,6 +82,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "mod_runtime.h"
 #include "crc32.h"
 #include "disc_identity.h"
+#include "psx_game_backend.h"
 #include "sbi_setup.h"
 #include "disc_path.h"
 #include "iso_reader.h"      /* text-image guard: extract the boot EXE from the disc */
@@ -2326,6 +2327,20 @@ static std::string uppercase_ascii(std::string s) {
 // prefix (e.g. "SCUS-94423" -> "(USA)"). Used only when game.toml [game]
 // leaves `region` unset. Unknown/empty serials yield "" (no badge) rather
 // than guessing.
+/* Drop a trailing region tag ("Bloody Roar II (Europe)" -> "Bloody Roar II").
+ * A universal build ships several regions in one image, so no single region may
+ * appear in the title. Only touches a parenthesised suffix. */
+[[maybe_unused]] static std::string strip_trailing_region(std::string s) {
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    if (s.size() < 2 || s.back() != ')') return s;
+    const size_t lp = s.rfind('(');
+    if (lp == std::string::npos) return s;
+    size_t cut = (lp > 0 && s[lp - 1] == ' ') ? lp - 1 : lp;
+    s.erase(cut);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+    return s;
+}
+
 static std::string region_label_from_serial(const std::string& serial) {
     if (serial.size() < 3) return std::string();
     const std::string up  = uppercase_ascii(serial);
@@ -2343,6 +2358,14 @@ static bool read_at(std::ifstream& f, uint64_t offset, uint8_t* out, size_t len)
     if (!f.good()) return false;
     f.read(reinterpret_cast<char*>(out), (std::streamsize)len);
     return f.gcount() == (std::streamsize)len;
+}
+
+/* Best-effort: the BOOT EXE stem the BIOS will load from this disc, parsed the
+ * same way arm_text_image_guard reads SYSTEM.CNF (a real ISO-directory read,
+ * not a byte scan). Used to select a regional game image when the cheap serial
+ * scan cannot see SYSTEM.CNF (some discs place it far into the image). */
+[[maybe_unused]] static std::string read_disc_boot_stem(const std::string& disc_path) {
+    return PSXRecompV4::disc_boot_stem(std::filesystem::path(disc_path));
 }
 
 struct DiscValidation {
@@ -2369,6 +2392,16 @@ static DiscValidation validate_disc_image(const std::filesystem::path& selected_
     v.has_header = id.has_header;
     v.id_matches = expect.empty() ? true : id.serial_matches;
     v.detail     = id.detail;
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+    /* Universal build: any linked regional image is a valid target, so a disc
+     * that names one of them is never "the wrong game". */
+    if (!v.id_matches) {
+        std::string stem = !id.detected_serial.empty() ? id.detected_serial
+                          : read_disc_boot_stem(selected_path.string());
+        if (!stem.empty() && psx_game_backend_match(stem.c_str()))
+            v.id_matches = true;
+    }
+#endif
     if (id.opened && id.has_header && !v.id_matches && v.detail.empty()) {
         v.detail = "The disc header is readable, but it does not contain the expected game ID " +
                    uppercase_ascii(expect) + " in the early disc metadata.";
@@ -7877,6 +7910,32 @@ namespace {
             ? id.detected_serial : expect_serial;
         std::snprintf(out->serial, sizeof(out->serial), "%s", serial.c_str());
         std::snprintf(out->region, sizeof(out->region), "%s", id.region.c_str());
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+        /* Universal build: accept any disc that names one of the linked images
+         * rather than gating every disc on this build's single configured
+         * game_id. Report the matched region so the launcher badge is right. */
+        const PsxGameBackend* reg_be = nullptr;
+        {
+            std::string stem = !id.detected_serial.empty() ? id.detected_serial
+                              : read_disc_boot_stem(disc_path);
+            if (!stem.empty()) reg_be = psx_game_backend_match(stem.c_str());
+        }
+        const bool registry_accepted = reg_be != nullptr;
+        if (registry_accepted) {
+            std::snprintf(out->serial, sizeof(out->serial), "%s", reg_be->game_id);
+            const std::string up = uppercase_ascii(reg_be->game_id);
+            const std::string p4 = up.substr(0, 4);
+            const char* reg = (p4 == "SCUS" || p4 == "SLUS" ||
+                               up.substr(0, 3) == "LSP")            ? "NTSC-U"
+                            : (p4 == "SCES" || p4 == "SLES")        ? "PAL"
+                            : (p4 == "SCPS" || p4 == "SLPS" ||
+                               p4 == "SLPM")                        ? "NTSC-J"
+                                                                    : "";
+            std::snprintf(out->region, sizeof(out->region), "%s", reg);
+        }
+#else
+        const bool registry_accepted = false;
+#endif
         out->iso_ok = id.has_header ? 1 : 0;
         if (g_lnch_netplay_available) {
             out->track_count = id.track_count;
@@ -7897,7 +7956,12 @@ namespace {
         // netplay-capable titles; ordinary offline disc verification is
         // strictly serial/header/optional-CRC based.
         if (!id.opened || !id.has_header)                            out->verdict = 3; // bad
-        else if (id.expected_serial_given && !id.serial_matches)     out->verdict = 3; // wrong disc
+        else if (id.expected_serial_given && !id.serial_matches) {
+            // A universal build owns every linked region, so a disc that names
+            // one of them is a valid pick even though it is not this build's
+            // configured game_id. Leave a positive verdict so Play stays enabled.
+            out->verdict = registry_accepted ? 1 : 3;                // wrong disc
+        }
         else if (id.expected_crc_given && id.crc_computed && !id.crc_matches) out->verdict = 2; // warn
         else if (g_lnch_netplay_available && !id.netplay_ok)         out->verdict = 2; // TOC/cue
         else                                                          out->verdict = 1; // ok
@@ -12177,6 +12241,7 @@ int main(int argc, char** argv) {
     const char* bios_path = PSX_DEFAULT_BIOS_PATH;
     const char* game_config_path = nullptr;
     const char* disc_override_path = nullptr;
+    std::string cli_verify_disc;
     bool        bios_from_cli = false;  /* CLI --bios/positional wins over settings.toml */
     /* Did the PLAYER choose this BIOS (CLI or settings), as opposed to it
      * being the compile-time default? Only a real choice overrides the
@@ -12256,6 +12321,9 @@ int main(int argc, char** argv) {
             game_config_path = consume_path_arg(i);
         } else if (std::strcmp(argv[i], "--disc") == 0 && i + 1 < argc) {
             disc_override_path = consume_path_arg(i);
+        } else if (std::strcmp(argv[i], "--verify-disc") == 0 && i + 1 < argc) {
+            cli_verify_disc = consume_path_arg(i);
+            force_no_launcher = true;
         } else if (std::strcmp(argv[i], "--debug-port") == 0 && i + 1 < argc) {
             cli_debug_port = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--memcard-dir") == 0 && i + 1 < argc) {
@@ -12442,6 +12510,12 @@ int main(int argc, char** argv) {
             game_name = gc.name;
             game_id   = gc.id;
             game_region = gc.region;
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+            /* Universal build: one image serves every linked region, so the
+             * display title must not name a single one (nor its badge below). */
+            game_name = strip_trailing_region(game_name);
+            game_region.clear();
+#endif
             game_players = gc.players;
             apply_offline_pad_count(game_players, multitap_enabled);
             game_has_disc_crc = gc.has_disc_crc;
@@ -12453,6 +12527,13 @@ int main(int argc, char** argv) {
             g_netplay_disc_expect.required_leadout_lba =
                 gc.netplay_required_leadout_lba;
             g_netplay_disc_expect.required_disc_fp = gc.netplay_required_disc_fp;
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+            /* Universal build: one [netplay] fingerprint cannot describe three
+             * regional dumps. The mounted disc is identified by its boot EXE,
+             * so the single-dump TOC-fingerprint gate does not apply here. */
+            g_netplay_disc_expect.required_disc_fp.clear();
+            g_netplay_disc_expect.has_required_leadout = false;
+#endif
             g_netplay_local_viewport =
                 (gc.netplay_local_viewport == "vertical_split") ? 1 : 0;
             g_netplay_local_viewport_aspect =
@@ -14679,6 +14760,26 @@ session_reboot:
     if (g_audio_spu_hq)
         std::fprintf(stdout, "psxrecomp: SPU float-shadow enabled (verified-enhancement)\n");
     spu_init();
+#if defined(RECOMP_LAUNCHER)
+    /* Diagnostic: run the launcher's own disc-verify pass for a path and exit.
+     * Mirrors exactly what the launcher shows, including the universal-build
+     * multi-region acceptance, so the verdict can be checked without a GUI. */
+    if (!cli_verify_disc.empty()) {
+        g_lnch_expected_serial = game_id;
+        g_lnch_expected_crc    = game_disc_crc;
+        g_lnch_has_crc         = game_has_disc_crc;
+        g_lnch_netplay_available = true;  /* exercise the netplay TOC gate too */
+        RecompLauncherCDiscVerify dv;
+        std::memset(&dv, 0, sizeof(dv));
+        ae_disc_verify(cli_verify_disc.c_str(), &dv);
+        std::fprintf(stdout,
+            "psxrecomp: verify-disc verdict=%d serial=%s region=%s iso_ok=%d "
+            "netplay_ok=%d detail=%s\n",
+            dv.verdict, dv.serial, dv.region, dv.iso_ok, dv.netplay_ok,
+            dv.netplay_detail);
+        return dv.verdict == 1 ? 0 : 2;
+    }
+#endif
     cdrom_init(disc_path_str.empty() ? NULL : disc_path_str.c_str());
 
     /* A disc was requested but nothing mounted. cdrom_init() is non-fatal here
@@ -14727,8 +14828,24 @@ session_reboot:
         const bool has_crc = game_has_disc_crc;
 #endif
 
+        /* Universal build: the mounted disc decides which regional image runs.
+         * Read its real BOOT EXE first (a true ISO-directory read, robust even
+         * when the cheap 16 MB serial scan cannot see SYSTEM.CNF) and gate the
+         * identity/timing check on that region's serial — never on this build's
+         * single configured game_id, which is why a Japan disc used to fall
+         * through to the Europe image. */
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+        const std::string disc_boot_stem = read_disc_boot_stem(disc_path_str);
+        const PsxGameBackend* selected_backend = disc_boot_stem.empty()
+            ? nullptr : psx_game_backend_match(disc_boot_stem.c_str());
+        const std::string ident_expected_serial = selected_backend
+            ? std::string(selected_backend->game_id) : expected_serial;
+#else
+        const std::string& ident_expected_serial = expected_serial;
+#endif
+
         const auto ident = PSXRecompV4::identify_disc(
-            disc_path_str, expected_serial, expected_crc,
+            disc_path_str, ident_expected_serial, expected_crc,
             has_crc, /*compute_crc*/false);
         if (ident.region == "PAL") {
             cdrom_set_disc_scex("SCEE");
@@ -14746,12 +14863,76 @@ session_reboot:
         if (!ident.region.empty())
             std::fprintf(stdout, "psxrecomp: disc region %s (serial %s)\n",
                          ident.region.c_str(), ident.detected_serial.c_str());
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+        /* Universal build: pick the regional game image that owns this disc's
+         * serial BEFORE any game code can run. A miss is fatal — routing an
+         * unknown disc to a guessed image is exactly the wrong-region bug this
+         * registry exists to prevent. */
+        {
+            const PsxGameBackend* be = selected_backend;
+            std::string select_key;
+            if (!be) {
+                select_key = !ident.detected_serial.empty()
+                    ? ident.detected_serial : disc_boot_stem;
+                if (select_key.empty()) select_key = expected_serial;
+                if (select_key.empty()) select_key = game_id;
+                be = psx_game_backend_select(select_key.c_str())
+                         ? psx_game_backend_active() : nullptr;
+            }
+            if (!be) {
+                std::fprintf(stderr,
+                    "psxrecomp: FATAL: no game image matches disc serial '%s'. "
+                    "This build carries: see psx_game_backend registrations.\n",
+                    select_key.c_str());
+                return 1;
+            }
+            /* Commit the choice to the registry. This MUST run even when the
+             * disc's boot EXE already named the image (selected_backend): the
+             * active pointer is what every psx_game_* forwarder reads, and a
+             * null active fails closed on the very first game dispatch. */
+            psx_game_backend_select(be->boot_exe_stem);
+            if (select_key.empty()) select_key = disc_boot_stem;
+            if (select_key.empty()) select_key = be->game_id;
+            std::fprintf(stdout, "psxrecomp: game image '%s' selected for %s\n",
+                         be->game_id, select_key.c_str());
+            /* Re-bind per-image identity. The single game.toml names the base
+             * region, but every linked image has its own entry PC (fntrace /
+             * savestate / rewind keys) and text bounds (overlay floor). */
+            if (be->entry_pc != 0) game_entry_pc = be->entry_pc;
+            if (be->load_address != 0) text_guard_load_addr = be->load_address;
+            {
+                extern uint32_t g_overlay_region_floor;
+                extern uint32_t g_text_image_lo;
+                const uint32_t load = be->load_address;
+                const uint32_t size = be->text_size;
+                if (load != 0 && size != 0) {
+                    const uint32_t text_end = (load + size) & 0x1FFFFFFFu;
+                    if (text_end > 0x00010000u) g_overlay_region_floor = text_end;
+                    const uint32_t text_lo = load & 0x1FFFFFFFu;
+                    if (text_lo > 0x00010000u && text_lo < g_overlay_region_floor)
+                        g_text_image_lo = text_lo;
+                }
+                const char* fenv = std::getenv("PSX_OVERLAY_REGION_FLOOR");
+                if (fenv && fenv[0]) {
+                    uint32_t v = (uint32_t)strtoul(fenv, nullptr, 0) & 0x1FFFFFFFu;
+                    if (v >= 0x00010000u) g_overlay_region_floor = v;
+                }
+            }
+        }
+#endif
     }
     /* Arm the text-image guard now that both possible sources are resolved:
-     * the local EXE file (dev checkouts) and the disc image (every install). */
-    if (game_config_path)
+     * the local EXE file (dev checkouts) and the disc image (every install).
+     * A universal build's single config names one region's local EXE only, so
+     * force the disc source there — the mounted disc is the true image. */
+    if (game_config_path) {
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+        arm_text_image_guard(std::string(), text_guard_load_addr, disc_path_str);
+#else
         arm_text_image_guard(text_guard_exe_path, text_guard_load_addr,
                              disc_path_str);
+#endif
+    }
     /* Executable/overlay patches from enabled mods, applied once the guard is
      * armed so a patched image is never mistaken for a divergent one. */
     mod_runtime_enable_disc_patches();
@@ -15802,7 +15983,11 @@ soft_return_lobby:
         }
 
         const std::string rui_region =
+#if defined(PSX_GAME_BACKEND_REGISTRY)
+            std::string();  /* universal: no single-region badge */
+#else
             !game_region.empty() ? game_region : region_label_from_serial(game_id);
+#endif
         std::vector<const char*> rui_lang_labels;
         rui_lang_labels.reserve(lang_menu_options.size());
         for (const auto& lo : lang_menu_options)
