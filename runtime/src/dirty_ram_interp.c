@@ -3112,7 +3112,18 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
             g_dirty_ram_last_unsupported_pc     = g_unsupported_pc;
             g_dirty_ram_last_unsupported_insn   = g_unsupported_insn;
             g_dirty_ram_last_unsupported_reason = g_unsupported_reason;
-            cpu->pc = 0;
+            /* Faithful R3000A behavior: an unrecognized opcode raises a
+             * Reserved Instruction exception (ExcCode 10) and vectors to the
+             * exception handler. A game that dispatches into a cleared/rebuilt
+             * handler slot (Final Bout's kernel IRQ chain walking a zeroed node,
+             * then running the zeroed slot and hitting a data word) therefore
+             * gets a catchable fault the guest can service, instead of the
+             * interpreter ending the guest with cpu->pc = 0 (which the top-level
+             * dispatch turns into psx_unknown_dispatch -> fail-fast). Uses the
+             * same interp_exception() path already used for Load/Store address
+             * errors. The first-instruction case above still returns 0 so
+             * psx_unknown_dispatch keeps resolving known trampoline patterns. */
+            interp_exception(cpu, 10u, 0u, g_unsupported_pc); /* Reserved Instruction */
             OV_FPLOG_RET1();
         }
         g_dirty_ram_insns_run++;

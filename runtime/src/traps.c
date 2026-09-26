@@ -1408,14 +1408,52 @@ void psx_unknown_dispatch(CPUState* cpu, uint32_t addr, uint32_t phys) {
         if (s_fail_fast) {
             extern void psx_crash_trace_dump(const char *reason, void *seh_info);
             psx_crash_trace_dump("fail_fast_unknown_dispatch", NULL);
-            char msg[256];
+            /* Observation-only diagnostic (no behavior change): record WHY the
+             * dispatcher refused this target. dirty_ram_dispatch() returns 0 for
+             * a kernel/overlay target whose page is (a) not dirty, (b) not game
+             * text, and (c) not an overlay region — after which the caller falls
+             * through to here. With this state in psx_crash.txt the miss becomes
+             * a resolvable datum instead of a blind fail-fast. It also names the
+             * last dirty-RAM interpreter unsupported-opcode, if any. */
+            extern int dirty_ram_is_dirty(uint32_t phys);
+            extern int psx_game_address_in_text(uint32_t addr);
+            extern int psx_kernel_bless_dispatchable(uint32_t phys);
+            extern uint32_t g_overlay_region_floor;
+            extern uint32_t g_text_image_lo;
+            extern const char *g_dirty_ram_last_unsupported_reason;
+            extern uint64_t g_dirty_ram_unsupported_midblock;
+            extern uint64_t g_dirty_ram_aborts;
+            extern uint32_t g_dirty_ram_last_unsupported_pc;
+            extern uint32_t g_dirty_ram_last_unsupported_insn;
+            extern uint32_t g_dirty_ram_last_unsupported_entry;
+            extern uint32_t g_dirty_ram_last_unsupported_entry_ra;
+            int _dirty   = dirty_ram_is_dirty(phys);
+            int _in_text = psx_game_address_in_text(addr);
+            int _kbless  = psx_kernel_bless_dispatchable(phys);
+            int _in_exc  = psx_get_in_exception();
+            int _overlay = (phys >= g_overlay_region_floor) ||
+                           (phys >= 0x00010000u && phys < g_text_image_lo);
+            const char *_unsup = g_dirty_ram_last_unsupported_reason
+                                     ? g_dirty_ram_last_unsupported_reason
+                                     : "(none)";
+            char msg[1024];
             snprintf(msg, sizeof(msg),
                 "FAIL-FAST unknown dispatch: addr=0x%08X phys=0x%08X ra=0x%08X "
                 "a0=0x%08X a1=0x%08X — see psx_last_run_report.json\n"
+                "  refusal context: dirty=%d overlay_region=%d in_text=%d "
+                "kbless=%d in_exception=%d interp_unsupported=%s\n"
+                "  interp detail: last_unsupported_pc=0x%08X insn=0x%08X "
+                "block_entry=0x%08X entry_ra=0x%08X midblock=%llu aborts=%llu\n"
                 "(recompiler discovery gap: if addr is BIOS ROM, seed it — "
                 "recompiler/seeds/ — and regen; PSX_FAIL_FAST_UNKNOWN_DISPATCH=0 "
                 "to survive-and-log instead)\n",
-                addr, phys, cpu->gpr[31], cpu->gpr[4], cpu->gpr[5]);
+                addr, phys, cpu->gpr[31], cpu->gpr[4], cpu->gpr[5],
+                _dirty, _overlay, _in_text, _kbless, _in_exc, _unsup,
+                g_dirty_ram_last_unsupported_pc, g_dirty_ram_last_unsupported_insn,
+                g_dirty_ram_last_unsupported_entry,
+                g_dirty_ram_last_unsupported_entry_ra,
+                (unsigned long long)g_dirty_ram_unsupported_midblock,
+                (unsigned long long)g_dirty_ram_aborts);
             trap_crash(msg);
             exit(1);
         }
