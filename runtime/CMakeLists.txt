@@ -23,6 +23,33 @@ psxrecomp_add_runtime_target(psx-runtime
 # (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
+    add_executable(ws_scene_hold_test tests/test_ws_scene_hold.c)
+    target_include_directories(ws_scene_hold_test PRIVATE include)
+    add_test(NAME ws_scene_hold_test COMMAND ws_scene_hold_test)
+    add_executable(mod_texture_banks_test tests/test_mod_texture_banks.c src/mod_texture_banks.c)
+    target_include_directories(mod_texture_banks_test PRIVATE include)
+    add_test(NAME mod_texture_banks_test COMMAND mod_texture_banks_test)
+    if(NOT MSVC)
+        add_executable(ws_world_scene_test tests/test_ws_world_scene.c)
+        target_include_directories(ws_world_scene_test PRIVATE include src)
+        target_compile_options(ws_world_scene_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+        target_link_options(ws_world_scene_test PRIVATE -flto -Wl,--gc-sections)
+        add_test(NAME ws_world_scene_test COMMAND ws_world_scene_test)
+        add_executable(mod_memory_snapshot_test tests/test_mod_memory_snapshot.c)
+        target_include_directories(mod_memory_snapshot_test PRIVATE include src)
+        target_compile_options(mod_memory_snapshot_test PRIVATE -O2 -flto -ffunction-sections -fdata-sections)
+        target_link_options(mod_memory_snapshot_test PRIVATE -flto -Wl,--gc-sections)
+        add_test(NAME mod_memory_snapshot_test COMMAND mod_memory_snapshot_test)
+    endif()
+    add_executable(sio_card_irq_integrity_test tests/test_sio_card_irq_integrity.c)
+    target_include_directories(sio_card_irq_integrity_test PRIVATE include)
+    foreach(scenario absent deselect pending coarse)
+        add_test(NAME sio_card_irq_integrity_${scenario}
+                 COMMAND sio_card_irq_integrity_test ${scenario})
+        # The retired environment variable must not reactivate the workaround.
+        set_tests_properties(sio_card_irq_integrity_${scenario} PROPERTIES
+            ENVIRONMENT "PSX_APE_CARD_UNSTICK=1")
+    endforeach()
     # Optional real-hardware regression. Configure its dependencies explicitly;
     # absence must remain visible, never counted as a passing GPU test.
     set(PSX_GL_READBACK_SDL_ROOT "" CACHE PATH "SDL3 static build root for GL readback test")
@@ -98,6 +125,13 @@ if(BUILD_TESTING)
         PSX_ENABLE_BLOCK_CYCLES=1
         PSX_OVERLAY_DLL_BUILD=1)
     add_test(NAME psx_icache_fastpath_test COMMAND psx_icache_fastpath_test)
+
+    add_executable(psx_icache_elision_guard_test
+        tests/test_psx_icache_elision_guard.c src/psx_icache.c)
+    target_include_directories(psx_icache_elision_guard_test PRIVATE include)
+    target_compile_definitions(psx_icache_elision_guard_test PRIVATE
+        PSX_ENABLE_BLOCK_CYCLES=1 PSX_OVERLAY_DLL_BUILD=1)
+    add_test(NAME psx_icache_elision_guard_test COMMAND psx_icache_elision_guard_test)
 
     foreach(_ram_geometry IN ITEMS retail expanded)
         add_executable(psx_memory_geometry_${_ram_geometry}_test
@@ -303,6 +337,17 @@ if(BUILD_TESTING)
     target_include_directories(overlay_path_canon_test PRIVATE include)
     add_test(NAME overlay_path_canon_test COMMAND overlay_path_canon_test)
 
+    # The kernel-bless verifier must accept a body whose DECLARED patch range
+    # the guest has overwritten (Psy-Q's install stubs land inside compiled
+    # kernel bodies) and still reject one changed anywhere else. Before this,
+    # the whole-body memcmp failed forever on the first install and the BIOS
+    # exception handler interpreted for the life of the process.
+    add_executable(kernel_patch_ranges_test
+        tests/test_kernel_patch_ranges.c
+        src/kernel_patch_ranges.c)
+    target_include_directories(kernel_patch_ranges_test PRIVATE include)
+    add_test(NAME kernel_patch_ranges_test COMMAND kernel_patch_ranges_test)
+
     # The player-facing "skip the BIOS" flag must resolve to the same boot
     # behaviour on retail SCPH-1001 and on the bundled OpenBIOS, whose
     # kernel-call HLE is (correctly) refused for want of a DeliverEvent anchor.
@@ -323,7 +368,7 @@ if(BUILD_TESTING)
         src/disc_path.cpp
         src/cue_sheet.cpp
         src/iso_reader.cpp)
-    target_include_directories(disc_path_resolve_test PRIVATE include)
+    target_include_directories(disc_path_resolve_test PRIVATE include ${PSXRECOMP_ROOT}/recompiler/include)
     target_link_libraries(disc_path_resolve_test PRIVATE chdr-static)
     add_test(NAME disc_path_resolve_test COMMAND disc_path_resolve_test)
 
@@ -334,20 +379,34 @@ if(BUILD_TESTING)
         ${PSXRECOMP_ROOT}/recompiler/include)
     add_test(NAME bios_rom_alias_test COMMAND bios_rom_alias_test)
 
+    # The game window opens at a normal size, not maximised.
+    add_executable(window_size_test tests/test_window_size.cpp)
+    target_include_directories(window_size_test PRIVATE include)
+    add_test(NAME window_size_test COMMAND window_size_test)
+
     # Multi-file cue TOC mapping (data track + CD-DA in separate bins).
     add_executable(iso_reader_cdda_test
         tests/test_iso_reader_cdda.cpp
         src/iso_reader.cpp
         src/cue_sheet.cpp)
-    target_include_directories(iso_reader_cdda_test PRIVATE include)
+    target_include_directories(iso_reader_cdda_test PRIVATE include ${PSXRECOMP_ROOT}/recompiler/include)
     target_link_libraries(iso_reader_cdda_test PRIVATE chdr-static)
     add_test(NAME iso_reader_cdda_test COMMAND iso_reader_cdda_test)
+
+    # Cue PREGAP/POSTGAP (gaps the dump does not store) shift the disc layout.
+    add_executable(iso_reader_pregap_test
+        tests/test_iso_reader_pregap.cpp
+        src/iso_reader.cpp
+        src/cue_sheet.cpp)
+    target_include_directories(iso_reader_pregap_test PRIVATE include ${PSXRECOMP_ROOT}/recompiler/include)
+    target_link_libraries(iso_reader_pregap_test PRIVATE chdr-static)
+    add_test(NAME iso_reader_pregap_test COMMAND iso_reader_pregap_test)
 
     add_executable(iso_reader_sbi_test
         tests/test_iso_reader_sbi.cpp
         src/iso_reader.cpp
         src/cue_sheet.cpp)
-    target_include_directories(iso_reader_sbi_test PRIVATE include)
+    target_include_directories(iso_reader_sbi_test PRIVATE include ${PSXRECOMP_ROOT}/recompiler/include)
     target_link_libraries(iso_reader_sbi_test PRIVATE chdr-static)
     add_test(NAME iso_reader_sbi_test COMMAND iso_reader_sbi_test)
 
@@ -380,8 +439,18 @@ if(BUILD_TESTING)
         src/psx_sha256.c)
     target_include_directories(mod_runtime_test PRIVATE
         include
+        ../recompiler/include
         ../recompiler/lib/toml11)
     target_link_libraries(mod_runtime_test PRIVATE chdr-static)
+    # The real disc hasher uses a 1 MiB scratch buffer. Match the runtime's
+    # stack allowance instead of overflowing MinGW's 1 MiB executable default.
+    if(WIN32)
+        if(MSVC)
+            target_link_options(mod_runtime_test PRIVATE /STACK:16777216)
+        else()
+            target_link_options(mod_runtime_test PRIVATE -Wl,--stack,16777216)
+        endif()
+    endif()
     add_test(NAME mod_runtime_test COMMAND mod_runtime_test)
 
     if(WIN32)
@@ -501,8 +570,9 @@ if(BUILD_TESTING)
     add_test(NAME gpu_vk_upload_alignment_test
              COMMAND gpu_vk_upload_alignment_test)
 
-    # Portable rollback helpers (retcomm-rbengine) — required for MotK netplay
-    # unit tests that use the netplay_* compatibility shims.
+    # Portable rollback helpers — required for MotK netplay unit tests that use
+    # the netplay_* compatibility shims. The peer-facing ones (hash_confirm,
+    # input_hist, rb_post) live in recomp-net; the snap ring in retcomm-rbengine.
     set(_RBE_ROOT "${PSXRECOMP_ROOT}/lib/retcomm-rbengine")
     set(_RNET_ROOT "${PSXRECOMP_ROOT}/lib/recomp-net")
     if(EXISTS "${_RBE_ROOT}/CMakeLists.txt" AND EXISTS "${_RNET_ROOT}/CMakeLists.txt")
@@ -528,7 +598,7 @@ if(BUILD_TESTING)
         add_executable(netplay_hash_confirm_test
             tests/test_netplay_hash_confirm.c)
         target_include_directories(netplay_hash_confirm_test PRIVATE include)
-        target_link_libraries(netplay_hash_confirm_test PRIVATE retcomm_rbengine)
+        target_link_libraries(netplay_hash_confirm_test PRIVATE recomp_net)
         add_test(NAME netplay_hash_confirm_test COMMAND netplay_hash_confirm_test)
 
         # save/load glue #included from the test; ring ops come from rbengine.
@@ -565,7 +635,7 @@ if(BUILD_TESTING)
 
         add_executable(rb_post_tip_filter_test tests/test_rb_post_tip_filter.c)
         target_include_directories(rb_post_tip_filter_test PRIVATE include)
-        target_link_libraries(rb_post_tip_filter_test PRIVATE retcomm_rbengine)
+        target_link_libraries(rb_post_tip_filter_test PRIVATE recomp_net)
         add_test(NAME rb_post_tip_filter_test COMMAND rb_post_tip_filter_test)
 
         add_executable(netplay_input_hist_test
@@ -576,7 +646,7 @@ if(BUILD_TESTING)
             ${_RNET_ROOT}/include)
         target_compile_definitions(netplay_input_hist_test PRIVATE
             PSX_HAS_RECOMP_NET=1)
-        target_link_libraries(netplay_input_hist_test PRIVATE retcomm_rbengine)
+        target_link_libraries(netplay_input_hist_test PRIVATE recomp_net)
         add_test(NAME netplay_input_hist_test COMMAND netplay_input_hist_test)
     endif()
 

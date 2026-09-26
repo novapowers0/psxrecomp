@@ -46,6 +46,7 @@
 #include "crash_trace.h"
 #include "gpu_gl_renderer.h"
 #include "lockstep.h"
+#include "guest_tty.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -3570,6 +3571,40 @@ static void handle_bioscall_dump(int id, const char *json)
     debug_server_send_line(out); free(out);
 }
 
+/* guest_tty_dump — bounded, structured capture of bytes emitted through the
+ * guest console. Hex avoids JSON escaping ambiguity and preserves arbitrary
+ * byte values. The command is observational and never consumes the ring. */
+static void handle_guest_tty_dump(int id, const char *json)
+{
+    int requested = json_get_int(json, "tail", 4096);
+    if (requested < 0) requested = 0;
+    if (requested > 65536) requested = 65536;
+
+    size_t cap = (size_t)requested;
+    uint8_t *bytes = cap ? (uint8_t *)malloc(cap) : NULL;
+    if (cap && !bytes) { send_err(id, "oom"); return; }
+
+    uint64_t total = 0;
+    size_t count = psx_guest_tty_snapshot(bytes, cap, &total);
+    size_t out_cap = 160u + count * 2u;
+    char *out = (char *)malloc(out_cap);
+    if (!out) { free(bytes); send_err(id, "oom"); return; }
+
+    size_t pos = (size_t)snprintf(
+        out, out_cap,
+        "{\"id\":%d,\"ok\":true,\"total\":%llu,\"tail\":%llu,\"hex\":\"",
+        id, (unsigned long long)total, (unsigned long long)count);
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < count; ++i) {
+        out[pos++] = digits[bytes[i] >> 4];
+        out[pos++] = digits[bytes[i] & 0x0Fu];
+    }
+    out[pos++] = '"'; out[pos++] = '}'; out[pos++] = '\n'; out[pos] = '\0';
+    debug_server_send_line(out);
+    free(out);
+    free(bytes);
+}
+
 /* bios_info — which recompiled BIOS this build links, and whether the
  * loaded ROM matches it. Everything static comes from psx_bios_image (the
  * generated dispatch's self-description, couriered from the BIOS profile);
@@ -5733,7 +5768,7 @@ static void handle_cdrom_command_history(int id, const char *json)
     uint64_t oldest = (total > CDROM_COMMAND_HISTORY_CAP)
         ? total - CDROM_COMMAND_HISTORY_CAP : 0;
 
-    size_t bufsz = 256u + (size_t)count * 640u;
+    size_t bufsz = 256u + (size_t)count * 800u;
     char *buf = (char *)malloc(bufsz);
     if (!buf) { send_err(id, "oom"); return; }
 
@@ -5746,7 +5781,7 @@ static void handle_cdrom_command_history(int id, const char *json)
                     (unsigned long long)oldest);
 
     uint64_t seq = total;
-    while (seq > oldest && emitted < count && pos < bufsz - 640) {
+    while (seq > oldest && emitted < count && pos < bufsz - 800) {
         seq--;
         const CDROMCommandHistoryEntry *e =
             &entries[seq % CDROM_COMMAND_HISTORY_CAP];
@@ -5774,13 +5809,18 @@ static void handle_cdrom_command_history(int id, const char *json)
                         "\"reading\":%u,\"pending_cmd\":\"0x%02X\","
                         "\"pending\":%u,\"queued_cmd\":\"0x%02X\","
                         "\"queued\":%u,\"func\":\"0x%08X\",\"pc\":\"0x%08X\","
-                        "\"i_stat\":\"0x%08X\"}",
+                        "\"i_stat\":\"0x%08X\",\"response\":[",
                         e->stat, e->request, e->irq_enable, e->irq_flag,
                         e->mode, e->seek_min, e->seek_sec, e->seek_sect,
                         e->read_min, e->read_sec, e->read_sect, e->read_cmd,
                         e->reading, e->pending_cmd, e->pending_pending,
                         e->queued_cmd, e->queued_pending, e->func, e->pc,
                         e->i_stat);
+        for (uint8_t i = 0; i < e->response_count && i < 16 && pos < bufsz - 16; i++) {
+            pos += snprintf(buf + pos, bufsz - pos,
+                            "%s\"0x%02X\"", i ? "," : "", e->response[i]);
+        }
+        pos += snprintf(buf + pos, bufsz - pos, "]}");
         emitted++;
     }
 
@@ -7010,7 +7050,7 @@ static void handle_imask_trace(int id, const char *json)
     send_fmt("]}\n");
 }
 
-/* Post-probe bit7 → TX 0x57 handoff (Ape Escape LOAD). */
+/* Post-probe SIO/INTC handoff; records hardware state, not game RAM. */
 static void handle_card_handoff(int id, const char *json)
 {
     int count = json_get_int(json, "count", 64);
@@ -7023,8 +7063,7 @@ static void handle_card_handoff(int id, const char *json)
 
     int start = count ? (idx - count + cap) % cap : 0;
     static const char *kinds[] = {
-        "?", "probe_abort", "b7_set", "b7_clear", "tx", "card_ack", "unstick",
-        "select_flush_ack", "ack_deferred_istat7", "nest_irq_pulse", "b7_hold"
+        "?", "probe_abort", "b7_set", "b7_clear", "tx", "card_ack"
     };
     send_fmt("{\"id\":%d,\"ok\":true,\"armed\":%d,\"total\":%d,\"count\":%d,\"entries\":[",
              id, sio_card_handoff_armed(), total, count);
@@ -7035,11 +7074,11 @@ static void handle_card_handoff(int id, const char *json)
         if (i) send_fmt(",");
         send_fmt("{\"kind\":\"%s\",\"byte\":\"0x%02X\",\"imask\":\"0x%03X\","
                  "\"pc\":\"0x%08X\",\"func\":\"0x%08X\","
-                 "\"a6c10\":\"0x%08X\",\"b4e30\":\"0x%08X\",\"b4e38\":\"0x%08X\","
+                 "\"ctrl\":\"0x%04X\",\"stat\":\"0x%04X\",\"card_state\":%u,"
                  "\"cyc\":%llu}",
                  k, e->byte, e->imask,
                  (unsigned)e->pc, (unsigned)e->func,
-                 (unsigned)e->a6c10, (unsigned)e->b4e30, (unsigned)e->b4e38,
+                 (unsigned)e->ctrl, (unsigned)e->stat, (unsigned)e->card_state,
                  (unsigned long long)e->cyc);
     }
     send_fmt("]}\n");
@@ -7735,20 +7774,24 @@ static void handle_ws_hud_mode(int id, const char *json)
 }
 
 /* Kernel-image bless state: {"cmd":"kernel_bless"} ->
- * entries/clean/mismatch/native_hits/verifies/invalidations.
+ * entries/clean/mismatch/native_hits/verifies/invalidations, plus the
+ * declared kernel patch ranges and the segments they made the verifier
+ * skip (psx_bios_kernel_patch_ranges).
  * (memory.c psx_kernel_bless_*; PSX_KERNEL_BLESS=0 disables the mechanism.) */
 static void handle_kernel_bless(int id, const char *json)
 {
-    extern void psx_kernel_bless_stats(uint64_t out[6]);
+    extern void psx_kernel_bless_stats(uint64_t out[8]);
     (void)json;
-    uint64_t s[6];
+    uint64_t s[8];
     psx_kernel_bless_stats(s);
     send_fmt("{\"id\":%d,\"ok\":true,\"entries\":%llu,\"clean\":%llu,"
              "\"mismatch\":%llu,\"native_hits\":%llu,\"verifies\":%llu,"
-             "\"invalidations\":%llu}",
+             "\"invalidations\":%llu,\"patch_ranges\":%llu,"
+             "\"patch_skips\":%llu}",
              id, (unsigned long long)s[0], (unsigned long long)s[1],
              (unsigned long long)s[2], (unsigned long long)s[3],
-             (unsigned long long)s[4], (unsigned long long)s[5]);
+             (unsigned long long)s[4], (unsigned long long)s[5],
+             (unsigned long long)s[6], (unsigned long long)s[7]);
 }
 
 static void handle_ws_margin(int id, const char *json)
@@ -7888,6 +7931,16 @@ static void handle_ws_aspect(int id, const char *json)
     send_fmt("{\"id\":%d,\"ok\":true,\"num\":%d,\"den\":%d}", id, num, den);
 }
 
+extern int psx_debug_display_aspect(int num, int den, int adaptive);
+static void handle_display_aspect(int id, const char *json) {
+    int num=json_get_int(json,"num",-1), den=json_get_int(json,"den",-1);
+    int adaptive=json_get_int(json,"adaptive",0);
+    if (!psx_debug_display_aspect(num,den,adaptive)) {
+        send_err(id,"invalid display aspect (4:3 through 32:9)");return;
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,\"num\":%d,\"den\":%d,\"adaptive\":%d}",id,num,den,adaptive!=0);
+}
+
 /* Live native-wide vs squash toggle (A/B): ws_nw on=<0|1> re-engages the wide
  * path in the chosen mode without a relaunch. 2 = native-wide, 1 = squash. */
 extern void psx_ws_set_native_wide(int on);
@@ -7971,6 +8024,7 @@ static void handle_ws_backdrop_margin(int id, const char *json)
     if (m != -123456789) g_ws_bd_margin = m;
     send_fmt("{\"id\":%d,\"ok\":true,\"margin\":%d,\"mode\":\"%s\"}",
              id, g_ws_bd_margin,
+             g_ws_bd_margin == -2 ? "adaptive" :
              g_ws_bd_margin < 0 ? "whole-row" : (g_ws_bd_margin == 0 ? "off" : "widen-cols"));
 }
 
@@ -11775,6 +11829,67 @@ static void handle_cd_read_log(int id, const char *json)
     send_fmt("]}\n");
 }
 
+/* disc_select: report the multi-disc roster, and optionally mount a different
+ * entry of it while the game runs.
+ *
+ * Without this the only disc-change mechanism is the CD-reinsert hotkey, which
+ * remounts the SAME image and so cannot answer a game asking for its other
+ * disc. It also makes multi-disc paths scriptable, which matters because the
+ * request usually sits behind menu navigation.
+ *
+ * Parameter "n" (optional int, 1-based): roster entry to mount. Omit it for a
+ * pure query. Selecting the already-mounted disc still cycles the tray, which
+ * is what a player pressing eject would get.
+ */
+static void handle_disc_select(int id, const char *json)
+{
+    int n = json_get_int(json, "n", 0);
+    int count = cdrom_disc_roster_count();
+    int ok = 1;
+
+    if (count == 0) {
+        send_fmt("{\"id\":%d,\"ok\":false,"
+                 "\"error\":\"no multi-disc roster registered\"}", id);
+        return;
+    }
+    /* Any supplied "n" is a select attempt, including an out-of-range one.
+     * Only an absent key (0) is a pure query, so a bad index reports the
+     * failure instead of passing as a successful read-back. */
+    if (n != 0) ok = cdrom_disc_select(n);
+
+    /* One buffer, one send: send_fmt terminates a line per call, so emitting
+     * the roster incrementally would split the response across lines. */
+    char buf[32 * 1024];
+    int w = snprintf(buf, sizeof(buf),
+                     "{\"id\":%d,\"ok\":%s,\"count\":%d,\"selected\":%d,"
+                     "\"discs\":[",
+                     id, ok ? "true" : "false", count, cdrom_disc_selected());
+    for (int i = 1; i <= count && w < (int)sizeof(buf); i++) {
+        char path_json[2048];
+        json_escape_string(path_json, sizeof(path_json),
+                           cdrom_disc_roster_path(i));
+        w += snprintf(buf + w, sizeof(buf) - (size_t)w, "%s\"%s\"",
+                      i > 1 ? "," : "", path_json);
+    }
+    if (w > (int)sizeof(buf) - 64) w = (int)sizeof(buf) - 64;
+    snprintf(buf + w, sizeof(buf) - (size_t)w,
+             "],\"has_disc\":%s,\"sectors\":%u,\"tracks\":%d}",
+             cdrom_has_disc() ? "true" : "false",
+             cdrom_mounted_sector_count(), cdrom_mounted_track_count());
+    send_fmt("%s", buf);
+}
+
+/* cd_reinsert: run the tray open/close cycle on the SAME image, which is what
+ * the reinsert hotkey does. Scripted access matters because the hotkey needs a
+ * focused window, so nothing could previously exercise the lid from a test. */
+static void handle_cd_reinsert(int id, const char *json)
+{
+    (void)json;
+    debug_force_cd_reinsert();
+    send_fmt("{\"id\":%d,\"ok\":true,\"has_disc\":%s}",
+             id, cdrom_has_disc() ? "true" : "false");
+}
+
 /* cdrom_instant_rate: get/set the 'instant' per-frame sector-IRQ budget
  * (step 3 tunable). Param "n" (optional int): new budget, clamped by
  * cdrom_set_instant_rate. Always returns the current value, so a no-arg
@@ -13605,6 +13720,7 @@ static const CmdEntry s_commands[] = {
     { "ws_hud_mode",       handle_ws_hud_mode },
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
+    { "display_aspect",    handle_display_aspect },
     { "ws_nw",             handle_ws_nw },
     { "scanline",          handle_scanline },
     { "ws_backdrop_ring",  handle_ws_backdrop_ring },
@@ -13693,6 +13809,7 @@ static const CmdEntry s_commands[] = {
     { "fntrace_dump",      handle_fntrace_dump },
     { "unknown_dispatch_log", handle_unknown_dispatch_log },
     { "bioscall_dump",     handle_bioscall_dump },
+    { "guest_tty_dump",    handle_guest_tty_dump },
     { "bios_info",         handle_bios_info },
     { "hle_dump",          handle_hle_dump },
     { "card_trace_dump",   handle_card_trace_dump },
@@ -13832,6 +13949,8 @@ static const CmdEntry s_commands[] = {
     { "fn_exit_dump",      handle_fn_exit_dump },
     { "overlay_dump",      handle_overlay_dump },
     { "cd_read_log",       handle_cd_read_log },
+    { "disc_select",       handle_disc_select },
+    { "cd_reinsert",       handle_cd_reinsert },
     { "overlay_loader_status", handle_overlay_loader_status },
     { "overlay_candidates",   handle_overlay_candidates },
     { "overlay_native_ring",  handle_overlay_native_ring },

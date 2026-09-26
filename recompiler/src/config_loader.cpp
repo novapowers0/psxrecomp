@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "bios_rom_alias.h"
+#include "host_path.h"
 #include "fmt/format.h"
 #include "ps1_exe_parser.h"
 
@@ -361,7 +362,7 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
     }
     if (runtime.contains("memcard_dir")) {
         const auto rel = toml::find<std::string>(runtime, "memcard_dir");
-        rt.memcard_dir = fs::absolute(root / rel);
+        rt.memcard_dir = PSXRecompV4::host_resolve(root, rel);
         rt.has_memcard_dir = true;
     }
     if (runtime.contains("disc_speed")) {
@@ -822,7 +823,7 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
 }
 
 fs::path find_project_root(const fs::path& config_path) {
-    fs::path cur = fs::absolute(config_path).parent_path();
+    fs::path cur = PSXRecompV4::host_absolute(config_path).parent_path();
     const fs::path fallback = cur;
     for (int i = 0; i < 8; ++i) {
         for (const char* marker : { ".gitignore", ".git", "CMakeLists.txt" }) {
@@ -858,7 +859,7 @@ static std::string derive_out_stem(const std::string& rom_basename) {
 }
 
 BiosConfig load_bios_config(const fs::path& config_path_in) {
-    const fs::path config_path = fs::absolute(config_path_in);
+    const fs::path config_path = PSXRecompV4::host_absolute(config_path_in);
     if (!fs::exists(config_path)) {
         throw std::runtime_error(
             fmt::format("config file not found: {}", config_path.string()));
@@ -923,7 +924,7 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
     // Tolerate either BIOS filename convention (bare "SCPH1001.BIN" vs
     // region-qualified "US-PSX-SCPH1001.BIN") — see bios_rom_alias.h. A no-op
     // for game [program].exe fields, which never match a BIOS model token.
-    const fs::path rom_path = resolve_bios_rom(fs::absolute(root / rom_field));
+    const fs::path rom_path = resolve_bios_rom(PSXRecompV4::host_resolve(root, rom_field));
 
     const uint32_t load_address =
         parse_hex(toml::find<std::string>(prog, "load_address"), "program.load_address");
@@ -957,13 +958,13 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
             fmt::format("{}: [recompiler] missing 'seeds' field", config_path.string()));
     }
     const std::string seeds_field = toml::find<std::string>(recomp, "seeds");
-    const fs::path seeds_path = fs::absolute(root / seeds_field);
+    const fs::path seeds_path = PSXRecompV4::host_resolve(root, seeds_field);
 
     const std::string out_dir_field =
         recomp.contains("out_dir")
             ? toml::find<std::string>(recomp, "out_dir")
             : std::string{"generated"};
-    const fs::path out_dir = fs::absolute(root / out_dir_field);
+    const fs::path out_dir = PSXRecompV4::host_resolve(root, out_dir_field);
 
     const bool strict = recomp.contains("strict")
                             ? toml::find<bool>(recomp, "strict")
@@ -1063,14 +1064,31 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
         }
     }
 
-    // [[recompiler.install_slots]] — kernel-RAM PCs the BIOS overwrites with
-    // dispatch stubs at runtime.
-    std::vector<uint32_t> install_slots;
+    // [[recompiler.install_slots]] — kernel-RAM ranges the BIOS or the game's
+    // Psy-Q libapi patchers overwrite at runtime. `ram_addr` alone keeps the
+    // original meaning (a 4-word jalr stub); `len` and `resume` describe the
+    // other patch shapes (BiosInstallSlot, bios_address_model.h).
+    std::vector<BiosInstallSlot> install_slots;
     if (recomp.contains("install_slots")) {
         for (const auto& v : recomp.at("install_slots").as_array()) {
-            install_slots.push_back(parse_hex(
+            BiosInstallSlot slot;
+            slot.ram_addr = parse_hex(
                 toml::find<std::string>(v, "ram_addr"),
-                "install_slots.ram_addr"));
+                "install_slots.ram_addr");
+            if (v.contains("len"))
+                slot.len = parse_hex(toml::find<std::string>(v, "len"),
+                                     "install_slots.len");
+            if (v.contains("resume")) {
+                const std::string r = toml::find<std::string>(v, "resume");
+                if      (r == "jalr")        slot.resume = BiosInstallSlot::Resume::Jalr;
+                else if (r == "fallthrough") slot.resume = BiosInstallSlot::Resume::Fallthrough;
+                else if (r == "none")        slot.resume = BiosInstallSlot::Resume::None;
+                else throw std::runtime_error(fmt::format(
+                    "{}: install_slots 0x{:08X}: resume must be \"jalr\", "
+                    "\"fallthrough\" or \"none\", got '{}'",
+                    config_path.string(), slot.ram_addr, r));
+            }
+            install_slots.push_back(slot);
         }
     }
 
@@ -1114,7 +1132,7 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
 }
 
 GameConfig load_game_config(const fs::path& config_path_in) {
-    const fs::path config_path = fs::absolute(config_path_in);
+    const fs::path config_path = PSXRecompV4::host_absolute(config_path_in);
     if (!fs::exists(config_path)) {
         throw std::runtime_error(
             fmt::format("game config not found: {}", config_path.string()));
@@ -1162,7 +1180,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         throw std::runtime_error(
             fmt::format("{}: [game] missing 'exe' or 'rom' field", config_path.string()));
     }
-    const fs::path exe_path = fs::absolute(root / exe_field);
+    const fs::path exe_path = PSXRecompV4::host_resolve(root, exe_field);
 
     // Auto-detect EXE header values for any field not explicitly set in TOML.
     // Parses the PS-X EXE header once and fills in load_address, entry_pc,
@@ -1230,10 +1248,10 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::vector<fs::path> discs;
     if (game.contains("discs")) {
         const auto& arr = toml::find<std::vector<std::string>>(game, "discs");
-        for (const auto& d : arr) discs.push_back(fs::absolute(root / d));
+        for (const auto& d : arr) discs.push_back(PSXRecompV4::host_resolve(root, d));
     } else if (game.contains("disc")) {
         const auto& d = toml::find<std::string>(game, "disc");
-        discs.push_back(fs::absolute(root / d));
+        discs.push_back(PSXRecompV4::host_resolve(root, d));
     }
     /* Per-disc serials, parallel to `discs`. Absent => no per-disc gate. */
     std::vector<std::string> disc_serials;
@@ -1332,12 +1350,12 @@ GameConfig load_game_config(const fs::path& config_path_in) {
             fmt::format("{}: [recompiler] missing 'seeds' field", config_path.string()));
     }
     const fs::path seeds_path =
-        fs::absolute(root / toml::find<std::string>(recomp, "seeds"));
+        PSXRecompV4::host_resolve(root, toml::find<std::string>(recomp, "seeds"));
 
     fs::path bios_thunks_path;
     if (recomp.contains("bios_thunks")) {
         bios_thunks_path =
-            fs::absolute(root / toml::find<std::string>(recomp, "bios_thunks"));
+            PSXRecompV4::host_resolve(root, toml::find<std::string>(recomp, "bios_thunks"));
     }
 
     // [recompiler] bios_config — the BIOS profile this game is built
@@ -1346,14 +1364,14 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     fs::path bios_config_path;
     if (recomp.contains("bios_config")) {
         bios_config_path =
-            fs::absolute(root / toml::find<std::string>(recomp, "bios_config"));
+            PSXRecompV4::host_resolve(root, toml::find<std::string>(recomp, "bios_config"));
     }
 
     const std::string out_dir_field =
         recomp.contains("out_dir")
             ? toml::find<std::string>(recomp, "out_dir")
             : std::string{"generated"};
-    const fs::path out_dir = fs::absolute(root / out_dir_field);
+    const fs::path out_dir = PSXRecompV4::host_resolve(root, out_dir_field);
 
     const bool strict = recomp.contains("strict")
                             ? toml::find<bool>(recomp, "strict")

@@ -3,7 +3,7 @@
 #
 # Stages the host exe, title sources, filtered psxrecomp/ + recomp-ui/, then
 # finishes with stage_setup_sdk.sh (emitters, OpenBIOS, MinGW DLLs).
-# Portable cmake/clang is NOT embedded by default — RetComM / the setup wizard
+# Portable cmake/clang is NOT embedded by default — Retro / the setup wizard
 # download cmake-clang-v1 from retcomm-toolchains (or accept an offline zip).
 #
 # Usage (from game repo root):
@@ -64,6 +64,10 @@ DISPLAY_NAME=""
 RECOMPILER_BUILD="build-recompiler"
 VERSION_ENV="RELEASE_VERSION"
 DISC_HINT="your legally owned game disc"
+# Wave-5 F4: a packaged game.toml without `overlay_cache = true` ships a runtime that never
+# initialises the overlay loader, so every streamed overlay runs on the interpreter (78 of
+# 105 releases measured 2026-09-16). Refuse unless the caller states why.
+SHIP_WITHOUT_OVERLAY_CACHE_BECAUSE=""
 PROJECT_FILES=()
 PROJECT_DIRS=()
 RUNTIME_DIRS=()
@@ -115,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --root) ROOT="${2:?}"; shift 2 ;;
     --embed-toolchain) EMBED_TOOLCHAIN=1; shift ;;
     --no-embed-toolchain) EMBED_TOOLCHAIN=0; shift ;;
+    --ship-without-overlay-cache-because) SHIP_WITHOUT_OVERLAY_CACHE_BECAUSE="${2:?}"; shift 2 ;;
     *)
       echo "error: unknown arg: $1" >&2
       usage 2
@@ -262,7 +267,7 @@ ZIP_NAME="${ZIP_PREFIX}-${VERSION}-${ARTIFACT}.zip"
 rm -f "${DIST}/${ZIP_NAME}"
 
 cp -a "${EXE}" "${STAGE}/"
-# Ship the stamp beside the exe so installers / RetComM can prefer it over VERSION.
+# Ship the stamp beside the exe so installers / Retro can prefer it over VERSION.
 if [[ -f "$(dirname "${EXE}")/psx_game_version.txt" ]]; then
   cp -a "$(dirname "${EXE}")/psx_game_version.txt" "${STAGE}/psx_game_version.txt"
 else
@@ -484,6 +489,17 @@ fi
 
 bash "${STAGE_SDK}" "${stage_args[@]}"
 
+if ! grep -qE '^[[:space:]]*overlay_cache[[:space:]]*=[[:space:]]*true' "${STAGE}/game.toml"; then
+  if [[ -z "${SHIP_WITHOUT_OVERLAY_CACHE_BECAUSE}" ]]; then
+    echo "error: REFUSING TO PACKAGE: ${STAGE}/game.toml has no '[runtime] overlay_cache = true'." >&2
+    echo "       The runtime never initialises the overlay loader without it, so every streamed" >&2
+    echo "       overlay runs on the dirty-RAM interpreter for every player. Add the key, or pass" >&2
+    echo "       --ship-without-overlay-cache-because '<reason>' to record why this title ships without it." >&2
+    exit 1
+  fi
+  echo "warning: packaging without overlay_cache = true (reason: ${SHIP_WITHOUT_OVERLAY_CACHE_BECAUSE})" >&2
+fi
+
 cat >"${STAGE}/README-SETUP.txt" <<EOF
 ${DISPLAY_NAME} ${VERSION} — setup package
 Platform: ${ARTIFACT}
@@ -498,11 +514,11 @@ Standalone:
 3. Provide ${DISC_HINT} (and optional retail SCPH-1001 BIOS; otherwise
    OpenBIOS is regenerated locally).
 4. Follow the Generate & rebuild wizard. On first rebuild the host downloads
-   cmake-clang-v1 from TechnicallyComputers/retcomm-toolchains (or you can
+   cmake-clang-v1 from RetroPortingToolKit/RetroPorting-Toolchains (or you can
    pick a local cmake-clang-v1-*.zip for offline builds). System cmake/ninja
    also works if already on PATH.
 
-RetComM uses this same zip: it harvests emitters into a shared SDK cache,
+Retro uses this same zip: it harvests emitters into a shared SDK cache,
 downloads the toolchain pack (or uses RETCOMM_TOOLCHAIN_DIR), and preserves
 saves/user config across updates.
 EOF
@@ -518,8 +534,12 @@ EOF
 # a cmake variable cannot be resolved here.
 if [[ -f "${STAGE}/CMakeLists.txt" ]]; then
   cml="${STAGE}/CMakeLists.txt"
-  guarded="$(grep -oE 'if\(EXISTS[[:space:]]+"\$\{CMAKE_CURRENT_SOURCE_DIR\}/[^"]+"' "${cml}" \
-               | sed -E 's|.*\$\{CMAKE_CURRENT_SOURCE_DIR\}/||; s|"$||' | sort -u)"
+  # A CMakeLists.txt with no if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/...") guard at
+  # all is normal, and grep exits 1 on no match. Under `set -e -o pipefail` that
+  # status propagates out of the command substitution and kills the packager
+  # here — silently, before any gate can report anything. Guard the assignment.
+  guarded="$( { grep -oE 'if\(EXISTS[[:space:]]+"\$\{CMAKE_CURRENT_SOURCE_DIR\}/[^"]+"' "${cml}" \
+                  || true; } | sed -E 's|.*\$\{CMAKE_CURRENT_SOURCE_DIR\}/||; s|"$||' | sort -u)"
   missing_refs=()
   while IFS= read -r rel; do
     [[ -z "${rel}" ]] && continue
