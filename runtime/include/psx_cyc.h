@@ -34,6 +34,7 @@
 #endif
 #include "cpu_state.h"   /* CPUState (guard-safe: cpu_state.h includes us last) */
 #include "psx_cycles.h"  /* inline psx_advance_cycles */
+#include "psx_memory.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,8 +93,15 @@ static inline void psx_cyc_local_cleanup(uint32_t **guard) {
 static inline void psx_cyc_charge(uint32_t cycles) {
     if (cycles == 0u) return;
 #if defined(PSX_OVERLAY_DLL_BUILD)
-    psx_advance_cycles(cycles);
+    psx_cpu_charge(cycles);
 #else
+    /* [timing] guest_cycle_scale: a scaled charge is the CPU charge itself
+     * (the one place CPU work is scaled); the batch below is the scale-1
+     * production path, unchanged. */
+    if (PSX_GCS_ACTIVE()) {
+        psx_cpu_charge(cycles);
+        return;
+    }
 #if defined(__GNUC__) || defined(__clang__)
     if (__builtin_expect(g_ls_replay_active | g_event_step_conservative, 0)) {
 #else
@@ -250,7 +258,7 @@ static inline uint32_t psx_cyc_load_word(CPUState* cpu, uint32_t addr,
             cpu->ld_which_t = (uint8_t)rt;
         }
         uint32_t value;
-        memcpy(&value, g_psx_ram + (phys & 0x1FFFFFu), sizeof(value));
+        memcpy(&value, g_psx_ram + (phys & g_psx_ram_mask), sizeof(value));
         return value;
     }
     return psx_cyc_load_word_slow(cpu, addr, rt, reg_mask);
@@ -280,7 +288,7 @@ static inline uint16_t psx_cyc_load_half(CPUState* cpu, uint32_t addr,
             cpu->ld_which_t = (uint8_t)rt;
         }
         uint16_t value;
-        memcpy(&value, g_psx_ram + (phys & 0x1FFFFFu), sizeof(value));
+        memcpy(&value, g_psx_ram + (phys & g_psx_ram_mask), sizeof(value));
         return value;
     }
     return psx_cyc_load_half_slow(cpu, addr, rt, reg_mask);
